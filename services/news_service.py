@@ -1,11 +1,12 @@
 import os
+import streamlit as st
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+NEWS_API_KEY = st.secrets.get("NEWS_API_KEY", os.getenv("NEWS_API_KEY"))
 
 
 def fetch_news_data(query):
