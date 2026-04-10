@@ -1,207 +1,238 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
-import requests
-from datetime import datetime, timedelta
-from google import genai
-import webbrowser
-from textblob import TextBlob
-import os
-from dotenv import load_dotenv
+import streamlit as st
+import time
+from styles.style import load_css
+from utils.helpers import (
+    initialize_session_state,
+    analyze_sentiment,
+    credibility_class,
+    set_status,
+    local_fake_news_detector,
+)
+from services.news_service import fetch_news_data
+from services.summary_service import generate_summary
 
-load_dotenv()
 
-# ================= API KEYS =================
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+st.set_page_config(
+    page_title="AI News Intelligence Portal",
+    page_icon="📰",
+    layout="wide"
+)
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+load_css()
+initialize_session_state()
 
-articles = []
-auto_refresh_on = False
-
-# ================= FUNCTIONS =================
-
+# ================= CORE FUNCTIONS =================
 def fetch_news(category=None):
-    query = search_entry.get().strip()
-
+    query = st.session_state.search_query.strip()
     if category:
         query = category
 
     if not query:
-        messagebox.showwarning("Input Error", "Enter topic or choose category.")
+        set_status("Enter a topic or choose a category.", "warning")
         return
 
-    status_label.config(text="Fetching latest news...", fg="yellow")
-    root.update_idletasks()
+    set_status("Fetching latest news...", "info")
+    st.session_state.last_query = query
+    st.session_state.summary = None
+    st.session_state.credibility_results = {}
 
-    from_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+    articles, error = fetch_news_data(query)
 
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": query,
-        "from": from_date,
-        "sortBy": "publishedAt",
-        "language": "en",
-        "pageSize": 8,
-        "apiKey": NEWS_API_KEY
-    }
+    if error:
+        set_status(error, "error")
+        return
 
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
+    st.session_state.articles = articles
 
-        news_box.delete("1.0", tk.END)
-        articles.clear()
+    if not st.session_state.articles:
+        set_status("No news found for this topic.", "warning")
+        return
 
-        if response.status_code != 200:
-            raise Exception(data.get("message", "API Error"))
-
-        articles.extend(data["articles"])
-
-        if not articles:
-            news_box.insert(tk.END, "❌ No news found.\n")
-            return
-
-        for i, article in enumerate(articles, 1):
-            sentiment = analyze_sentiment(article["title"])
-
-            news_box.insert(tk.END, f"📰 {i}. {article['title']}\n", "headline")
-            news_box.insert(tk.END, f"Source: {article['source']['name']} | {sentiment}\n")
-
-            link = article["url"]
-            news_box.insert(tk.END, "Read More\n", ("link", link))
-            news_box.insert(tk.END, "-" * 60 + "\n")
-
-        status_label.config(text="Latest news loaded.", fg="lightgreen")
-
-    except Exception as e:
-        news_box.insert(tk.END, f"Error: {e}")
-        status_label.config(text="Error fetching news.", fg="red")
-
-
-def analyze_sentiment(text):
-    analysis = TextBlob(text)
-    polarity = analysis.sentiment.polarity
-
-    if polarity > 0:
-        return "😊 Positive"
-    elif polarity < 0:
-        return "😡 Negative"
-    else:
-        return "😐 Neutral"
+    set_status("Latest news loaded successfully.", "success")
 
 
 def summarize_news():
-    if not articles:
-        messagebox.showwarning("No Content", "Fetch news first.")
+    if not st.session_state.articles:
+        set_status("Fetch news first before generating a summary.", "warning")
         return
 
-    status_label.config(text="Generating AI summary...", fg="cyan")
+    set_status("Generating AI summary...", "info")
 
-    try:
-        combined_text = ""
-        for article in articles[:5]:
-            combined_text += article["title"] + "\n"
+    summary, error = generate_summary(st.session_state.articles[:5])
 
-        limited_content = combined_text[:3000]
+    print("Returned Summary:", summary)
+    print("Returned Error:", error)
 
-        response = client.models.generate_content(
-            model="models/gemini-2.5-flash",
-            contents=f"Summarize this news in 5 bullet points:\n{limited_content}"
-        )
+    if error:
+        st.session_state.summary = None
+        set_status(error, "warning")
+        return
 
-        summary = response.text
+    st.session_state.summary = summary
+    set_status("Summary generated successfully.", "success")
 
-        news_box.delete("1.0", tk.END)
-        news_box.insert(tk.END, "🤖 AI SUMMARY\n\n", "title")
-        news_box.insert(tk.END, summary)
 
-        status_label.config(text="Summary generated.", fg="lightgreen")
+def analyze_article_credibility(index):
+    if index >= len(st.session_state.articles):
+        return
 
-    except Exception as e:
-        news_box.insert(tk.END, f"AI Error: {e}")
-        status_label.config(text="AI error.", fg="red")
+    article = st.session_state.articles[index]
+    title = article.get("title", "")
+    description = article.get("description", "")
+    source = article.get("source", {}).get("name", "Unknown Source")
+
+    if not title.strip():
+        set_status("Not enough article data for fake news detection.", "warning")
+        return
+
+    set_status("Running fake news detection...", "info")
+
+    result = local_fake_news_detector(title, description, source)
+    st.session_state.credibility_results[index] = result
+
+    set_status("Fake news detection completed.", "success")
+
+
+def analyze_all_credibility():
+    if not st.session_state.articles:
+        set_status("Fetch news first before running fake news detection.", "warning")
+        return
+
+    set_status("Checking visible news...", "info")
+
+    for i in range(min(5, len(st.session_state.articles))):
+        article = st.session_state.articles[i]
+        title = article.get("title", "")
+        description = article.get("description", "")
+        source = article.get("source", {}).get("name", "Unknown Source")
+
+        if not title.strip():
+            continue
+
+        result = local_fake_news_detector(title, description, source)
+        st.session_state.credibility_results[i] = result
+
+    set_status("Fake news detection updated.", "success")
 
 
 def toggle_auto_refresh():
-    global auto_refresh_on
-    auto_refresh_on = not auto_refresh_on
-
-    if auto_refresh_on:
-        status_label.config(text="Auto-refresh ON", fg="cyan")
-        auto_refresh()
+    if st.session_state.auto_refresh_on:
+        set_status("Auto-refresh is ON.", "info")
     else:
-        status_label.config(text="Auto-refresh OFF", fg="red")
+        set_status("Auto-refresh is OFF.", "warning")
 
 
-def auto_refresh():
-    if auto_refresh_on:
+# ================= HEADER =================
+st.markdown('<div class="main-title">📰 AI News Intelligence Portal</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="sub-title">Live news, sentiment analysis, AI summary, and fake news detection</div>',
+    unsafe_allow_html=True
+)
+st.markdown('<div class="simple-line"></div>', unsafe_allow_html=True)
+
+# ================= STATUS =================
+status_class = f"status-{st.session_state.status_type}"
+st.markdown(
+    f'<div class="status-box {status_class}">{st.session_state.status_text}</div>',
+    unsafe_allow_html=True
+)
+
+# ================= SEARCH =================
+st.markdown('<div class="section-title">Search News</div>', unsafe_allow_html=True)
+
+st.text_input(
+    "Search News",
+    key="search_query",
+    placeholder="Search your news here...",
+    label_visibility="collapsed"
+)
+
+btn_col1, btn_col2, btn_col3 = st.columns([1.2, 1.2, 5])
+
+with btn_col1:
+    if st.button("Search"):
         fetch_news()
-        root.after(60000, auto_refresh)
 
+with btn_col2:
+    if st.button("AI Summary"):
+        summarize_news()
 
-def open_link(event):
-    index = news_box.index("@%s,%s" % (event.x, event.y))
-    tags = news_box.tag_names(index)
+st.markdown('<div class="simple-line"></div>', unsafe_allow_html=True)
 
-    for tag in tags:
-        if tag.startswith("http"):
-            webbrowser.open(tag)
+# ================= CONTROLS =================
+left, right = st.columns([5, 1.8])
 
+with left:
+    st.markdown('<div class="section-title">Categories</div>', unsafe_allow_html=True)
+    cat_cols = st.columns(5)
+    categories = ["Technology", "Sports", "Business", "Health", "Entertainment"]
 
-# ================= GUI =================
+    for i, cat in enumerate(categories):
+        with cat_cols[i]:
+            if st.button(cat, key=f"cat_{cat}"):
+                fetch_news(cat)
 
-root = tk.Tk()
-root.title("🚀 AI News Intelligence Dashboard")
-root.geometry("950x680")
-root.configure(bg="#121212")
+with right:
+    st.markdown('<div class="section-title">Controls</div>', unsafe_allow_html=True)
 
-tk.Label(root, text="🧠 AI News Intelligence Dashboard",
-         font=("Arial", 22, "bold"),
-         bg="#121212", fg="#00ffcc").pack(pady=10)
+    st.toggle(
+        "Auto Refresh",
+        key="auto_refresh_on",
+        on_change=toggle_auto_refresh
+    )
 
-frame = tk.Frame(root, bg="#121212")
-frame.pack()
+st.markdown('<div class="simple-line"></div>', unsafe_allow_html=True)
 
-search_entry = tk.Entry(frame, width=40, font=("Arial", 13))
-search_entry.pack(side=tk.LEFT, padx=5)
+# ================= SUMMARY =================
+print("Current session summary:", st.session_state.summary)
 
-tk.Button(frame, text="Search",
-          command=fetch_news,
-          bg="#00c853", fg="white").pack(side=tk.LEFT, padx=5)
+if st.session_state.summary is not None and str(st.session_state.summary).strip() != "":
+    st.markdown('<div class="section-title">🤖 AI Summary</div>', unsafe_allow_html=True)
+    st.write(st.session_state.summary)
+    st.markdown('<div class="simple-line"></div>', unsafe_allow_html=True)
 
-tk.Button(frame, text="AI Summary",
-          command=summarize_news,
-          bg="#2962ff", fg="white").pack(side=tk.LEFT, padx=5)
+# ================= NEWS =================
+if st.session_state.articles:
+    st.markdown('<div class="section-title">Latest News</div>', unsafe_allow_html=True)
 
-tk.Button(frame, text="Auto Refresh",
-          command=toggle_auto_refresh,
-          bg="#ff6d00", fg="white").pack(side=tk.LEFT, padx=5)
+    for i, article in enumerate(st.session_state.articles):
+        title = article.get("title", "No title available")
+        source = article.get("source", {}).get("name", "Unknown Source")
+        description = article.get("description") or "No description available."
+        link = article.get("url", "#")
+        sentiment = analyze_sentiment(title)
 
-# Categories
-cat_frame = tk.Frame(root, bg="#121212")
-cat_frame.pack(pady=5)
+        st.markdown(f"""
+        <div class="news-card">
+            <div class="news-title">📰 {i+1}. {title}</div>
+            <div class="news-meta"><b>Source:</b> {source} &nbsp; | &nbsp; <b>Sentiment:</b> {sentiment}</div>
+            <div class="news-desc">{description}</div>
+            <div><a href="{link}" target="_blank">Read full article</a></div>
+        </div>
+        """, unsafe_allow_html=True)
 
-for cat in ["Technology", "Sports", "Business", "Health", "Entertainment"]:
-    tk.Button(cat_frame, text=cat,
-              command=lambda c=cat: fetch_news(c),
-              bg="#333", fg="white").pack(side=tk.LEFT, padx=4)
+        if st.button("Verify News", key=f"verify_{i}"):
+            analyze_article_credibility(i)
 
-news_box = tk.Text(root, wrap=tk.WORD, bg="#1e1e1e", fg="white")
-news_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        if i in st.session_state.credibility_results:
+            result = st.session_state.credibility_results[i]
+            css_class = credibility_class(result["label"])
 
-scroll = ttk.Scrollbar(news_box)
-scroll.pack(side=tk.RIGHT, fill=tk.Y)
-news_box.config(yscrollcommand=scroll.set)
-scroll.config(command=news_box.yview)
+            st.markdown(
+                f'<div class="{css_class}">Detection Result: {result["label"]}</div>',
+                unsafe_allow_html=True
+            )
+            st.write(f"**Confidence:** {result['confidence']}")
+            st.write(f"**Reason:** {result['reason']}")
 
-news_box.tag_config("title", font=("Arial", 16, "bold"), foreground="#00e5ff")
-news_box.tag_config("headline", font=("Arial", 12, "bold"))
-news_box.tag_config("link", foreground="#64b5f6", underline=True)
+        st.markdown('<div class="news-separator"></div>', unsafe_allow_html=True)
 
-news_box.tag_bind("link", "<Button-1>", open_link)
+else:
+    st.write("Search for a topic or choose a category to fetch the latest news.")
 
-status_label = tk.Label(root, text="Ready", bg="#121212", fg="lightgreen")
-status_label.pack()
-
-root.mainloop()
+# ================= AUTO REFRESH =================
+if st.session_state.auto_refresh_on:
+    time.sleep(60)
+    if st.session_state.last_query:
+        fetch_news(st.session_state.last_query)
+    st.rerun()
