@@ -3,11 +3,14 @@ import streamlit as st
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from streamlit.errors import StreamlitSecretNotFoundError
 
 load_dotenv()
 
-NEWS_API_KEY = st.secrets.get("NEWS_API_KEY", os.getenv("NEWS_API_KEY"))
-
+try:
+    NEWS_API_KEY = st.secrets["NEWS_API_KEY"]
+except (StreamlitSecretNotFoundError, KeyError):
+    NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 def fetch_news_data(query):
     from_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
